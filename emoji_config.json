@@ -11,10 +11,8 @@
     "Druid": "druid"
   },
   "races": {
-    "Human": "human",
-    "Dwarf": "dwarf",
-    "Night Elf": "night_elf",
-    "Gnome": "gnome",
+    "Windshaper Skyborne": "windshaper_skyborne",
+    "Skyborne": "windshaper_skyborne",
     "Orc": "orc",
     "Undead": "undead",
     "Tauren": "tauren",

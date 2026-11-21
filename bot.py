@@ -255,16 +255,17 @@ def resolve_emoji_tokens(content: str, guild: discord.Guild | None) -> str:
 def choose_level_up_message(character_full_name: str, display_name: str, level: int, rank: int, total_players: int) -> str:
     eligible = list(GENERAL_LEVEL_MESSAGES)
 
-    # For odd-sized rosters, the upper half gets the extra position. Ranking is
-    # by current level descending, then character name alphabetically for ties.
     upper_half_size = (total_players + 1) // 2
-        if rank <= upper_half_size:
+
+    if rank <= upper_half_size:
         eligible.extend(UPPER_HALF_LEVEL_MESSAGES)
     else:
         eligible.extend(LOWER_HALF_LEVEL_MESSAGES)
 
     eligible.extend(SPECIAL_PLAYER_MESSAGES.get(character_full_name.casefold(), []))
+
     selected = random.choice(eligible)
+
     return selected.format(name=display_name, level=level)
 
 

@@ -209,12 +209,6 @@ LOWER_HALF_LEVEL_MESSAGES = [
     "{name} has just hit level {level}! 3FanZ levelling speeds over here :sob: :snail:",
 ]
 
-LOWER_HALF_LEVEL_MESSAGES = [
-    "{name} has just hit level {level}! At the rate this guy's going, he might be 60 by 2030 :rofl:",
-    "{name} has just hit level {level}! Sluggish gaming :sob: :snail:",
-    "{name} has just hit level {level}! 3FanZ levelling speeds over here :sob: :snail:",
-]
-
 SPECIAL_PLAYER_MESSAGES = {
     "burberry scarf": [
         "{name} has just hit level {level}! 68 Doidge Road, B23 7SG, Birmingham, West Midlands :rofl:"
@@ -264,10 +258,10 @@ def choose_level_up_message(character_full_name: str, display_name: str, level: 
     # For odd-sized rosters, the upper half gets the extra position. Ranking is
     # by current level descending, then character name alphabetically for ties.
     upper_half_size = (total_players + 1) // 2
-    if rank <= upper_half_size:
-    eligible.extend(UPPER_HALF_LEVEL_MESSAGES)
-else:
-    eligible.extend(LOWER_HALF_LEVEL_MESSAGES)
+        if rank <= upper_half_size:
+        eligible.extend(UPPER_HALF_LEVEL_MESSAGES)
+    else:
+        eligible.extend(LOWER_HALF_LEVEL_MESSAGES)
 
     eligible.extend(SPECIAL_PLAYER_MESSAGES.get(character_full_name.casefold(), []))
     selected = random.choice(eligible)

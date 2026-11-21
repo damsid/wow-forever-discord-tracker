@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 import os
 import sqlite3
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 import discord
@@ -21,6 +23,7 @@ CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 UPDATE_MINUTES = max(5, int(os.getenv("UPDATE_MINUTES", "30")))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "tracker.sqlite3")
+EMOJI_CONFIG_PATH = os.getenv("EMOJI_CONFIG_PATH", "emoji_config.json")
 
 API_BASE = "https://eu.api.blizzard.com"
 API_NAMESPACE = "profile-forever-eu"
@@ -34,15 +37,31 @@ log = logging.getLogger("wow-tracker")
 
 if not all([DISCORD_TOKEN, BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, CHANNEL_ID]):
     raise RuntimeError(
-        "Set DISCORD_TOKEN, BLIZZARD_CLIENT_ID, "
-        "BLIZZARD_CLIENT_SECRET and DISCORD_CHANNEL_ID in your .env file."
+        "Set DISCORD_TOKEN, BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET "
+        "and DISCORD_CHANNEL_ID in your environment."
     )
+
+
+# ---------- Name formatting ----------
+
+def standardise_name(value: str) -> str:
+    """Trim whitespace and capitalise the first character of the name."""
+    value = value.strip()
+    if not value:
+        raise ValueError("Character names cannot be blank.")
+    return value[0].upper() + value[1:].lower()
+
+
+def character_slug(first_name: str, surname: str) -> str:
+    return f"{standardise_name(first_name)}-{standardise_name(surname)}".casefold()
 
 
 # ---------- SQLite storage ----------
 
 def db_connect():
-    con = sqlite3.connect(DATABASE_PATH)
+    db_path = Path(DATABASE_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
     return con
 
@@ -69,22 +88,35 @@ def init_db():
 def list_players():
     with db_connect() as con:
         return con.execute(
-            "SELECT * FROM players ORDER BY lower(nickname), lower(first_name)"
+            "SELECT * FROM players ORDER BY lower(first_name), lower(surname)"
         ).fetchall()
 
 
-def add_player(first_name, surname, nickname):
-    slug = f"{first_name.strip()}-{surname.strip()}".casefold()
+def add_player(first_name: str, surname: str, nickname: str):
+    first_name = standardise_name(first_name)
+    surname = standardise_name(surname)
+    slug = character_slug(first_name, surname)
     with db_connect() as con:
         con.execute(
             """INSERT INTO players(slug, first_name, surname, nickname, added_at)
                VALUES (?, ?, ?, ?, ?)""",
-            (slug, first_name.strip(), surname.strip(), nickname.strip(),
+            (slug, first_name, surname, nickname.strip(),
              datetime.now(timezone.utc).isoformat())
         )
 
 
-def delete_player(slug):
+def update_nickname(first_name: str, surname: str, nickname: str) -> bool:
+    slug = character_slug(first_name, surname)
+    with db_connect() as con:
+        cur = con.execute(
+            "UPDATE players SET nickname = ? WHERE slug = ?",
+            (nickname.strip(), slug)
+        )
+        return cur.rowcount > 0
+
+
+def delete_player(first_name: str, surname: str) -> bool:
+    slug = character_slug(first_name, surname)
     with db_connect() as con:
         cur = con.execute("DELETE FROM players WHERE slug = ?", (slug,))
         return cur.rowcount > 0
@@ -98,7 +130,7 @@ def get_roster_messages():
         return {row["page"]: row["message_id"] for row in rows}
 
 
-def save_roster_message(page, message_id):
+def save_roster_message(page: int, message_id: int):
     with db_connect() as con:
         con.execute(
             """INSERT INTO roster_messages(page, message_id) VALUES (?, ?)
@@ -107,7 +139,7 @@ def save_roster_message(page, message_id):
         )
 
 
-def delete_roster_message_page(page):
+def delete_roster_message_page(page: int):
     with db_connect() as con:
         con.execute("DELETE FROM roster_messages WHERE page = ?", (page,))
 
@@ -138,9 +170,10 @@ def get_access_token():
     return _access_token
 
 
-def lookup_character(first_name, surname):
-    # WoW Forever characters have no realm. Their EU slug is first-surname.
-    slug = f"{first_name.strip()}-{surname.strip()}".casefold()
+def lookup_character(first_name: str, surname: str):
+    first_name = standardise_name(first_name)
+    surname = standardise_name(surname)
+    slug = character_slug(first_name, surname)
     url = f"{API_BASE}/profile/wow/character/{quote(slug, safe='-')}"
 
     response = requests.get(
@@ -164,16 +197,129 @@ def lookup_character(first_name, surname):
 
     return {
         "ok": True,
-        "name": f'{data.get("name", first_name)} {data.get("surname", surname)}',
+        "name": standardise_name(data.get("name") or first_name),
+        "surname": standardise_name(data.get("surname") or surname),
         "level": data.get("level", "?"),
         "race": race,
-        "class": char_class,
-        "ruleset": (data.get("ruleset") or {}).get("name", "")
+        "class": char_class
     }
 
 
-async def lookup_character_async(first_name, surname):
+async def lookup_character_async(first_name: str, surname: str):
     return await asyncio.to_thread(lookup_character, first_name, surname)
+
+
+# ---------- Custom emoji configuration ----------
+
+def load_emoji_config():
+    path = Path(EMOJI_CONFIG_PATH)
+    if not path.exists():
+        log.warning("Emoji config %s not found; roster will show no class/race emojis.", path)
+        return {"classes": {}, "races": {}}
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            config = json.load(f)
+        return {
+            "classes": config.get("classes", {}),
+            "races": config.get("races", {})
+        }
+    except (OSError, json.JSONDecodeError):
+        log.exception("Could not read emoji configuration %s", path)
+        return {"classes": {}, "races": {}}
+
+
+def make_emoji_lookup(guild: discord.Guild | None):
+    if guild is None:
+        return {}
+    return {emoji.name.casefold(): str(emoji) for emoji in guild.emojis}
+
+
+def custom_emoji(game_name: str, category: str, config: dict, available: dict) -> str:
+    emoji_name = config.get(category, {}).get(game_name, "")
+    if not emoji_name:
+        return ""
+    found = available.get(str(emoji_name).casefold())
+    if not found:
+        log.warning(
+            "Missing server emoji '%s' configured for %s '%s'.",
+            emoji_name, category, game_name
+        )
+        return ""
+    return found
+
+
+# ---------- Roster embeds ----------
+
+MEDALS = ["🥇", "🥈", "🥉"]
+
+
+def level_sort_key(item):
+    data = item["data"]
+    if not data.get("ok"):
+        return (1, 0, item["player"]["first_name"].casefold())
+    try:
+        level = int(data.get("level", 0))
+    except (TypeError, ValueError):
+        level = 0
+    return (0, -level, data.get("name", "").casefold())
+
+
+def build_embeds(results, guild: discord.Guild | None):
+    # Successful profiles rank by level. Failed lookups are placed after them.
+    ordered = sorted(results, key=level_sort_key)
+    emoji_config = load_emoji_config()
+    available_emojis = make_emoji_lookup(guild)
+
+    checked_at = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
+    chunks = [ordered[i:i + 25] for i in range(0, len(ordered), 25)] or [[]]
+    pages = []
+
+    # Rank only successful character profiles, and do so across all pages.
+    rank_by_slug = {}
+    successful = [item for item in ordered if item["data"].get("ok")]
+    for rank, item in enumerate(successful[:3], start=1):
+        rank_by_slug[item["player"]["slug"]] = MEDALS[rank - 1]
+
+    for page_number, chunk in enumerate(chunks, start=1):
+        embed = discord.Embed(
+            title="WoW Forever — Player List",
+            description="EU character roster · Ordered by level · Automatically refreshed",
+            colour=discord.Colour.gold()
+        )
+
+        if not ordered:
+            embed.description = "No characters are being tracked yet. Use `/addplayer` to add one."
+
+        for item in chunk:
+            player = item["player"]
+            data = item["data"]
+            nickname = player["nickname"]
+
+            if data.get("ok"):
+                character_name = f'{data["name"]} {data["surname"]}'
+                title = character_name + (f" ({nickname})" if nickname else "")
+                race_emoji = custom_emoji(data["race"], "races", emoji_config, available_emojis)
+                class_emoji = custom_emoji(data["class"], "classes", emoji_config, available_emojis)
+                rank_emoji = rank_by_slug.get(player["slug"], "")
+                prefix = " ".join(part for part in [rank_emoji, race_emoji, class_emoji] if part)
+                if prefix:
+                    title = f"{prefix} {title}"
+                value = f'**Level {data["level"]}** · {data["race"]} {data["class"]}'
+            else:
+                title = f'{player["first_name"]} {player["surname"]}'
+                if nickname:
+                    title += f" ({nickname})"
+                value = f'⚠️ {data["error"]}'
+
+            embed.add_field(name=title[:256], value=value[:1024], inline=False)
+
+        embed.set_footer(
+            text=f"Last checked: {checked_at} · Updates every {UPDATE_MINUTES} minutes · Page {page_number}/{len(chunks)}"
+        )
+        pages.append(embed)
+
+    return pages
 
 
 # ---------- Discord bot ----------
@@ -191,56 +337,12 @@ class WoWTracker(commands.Bot):
             log.info("Slash commands synced to server %s.", GUILD_ID)
         else:
             await self.tree.sync()
-            log.info("Global slash commands synced; global propagation can take a while.")
+            log.info("Global slash commands synced; propagation can take a while.")
         if not scheduled_refresh.is_running():
             scheduled_refresh.start()
 
 
 bot = WoWTracker(command_prefix="!", intents=intents)
-
-
-def build_embeds(results):
-    # Discord allows at most 25 fields per embed. Split larger rosters into pages.
-    pages = []
-    chunks = [results[i:i + 25] for i in range(0, len(results), 25)] or [[]]
-
-    checked_at = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
-
-    for page_number, chunk in enumerate(chunks, start=1):
-        embed = discord.Embed(
-            title="WoW Forever — Player List",
-            description="EU character roster · Automatically refreshed",
-            colour=discord.Colour.blurple()
-        )
-
-        for item in chunk:
-            player = item["player"]
-            nickname = player["nickname"]
-            display_name = (
-                f'{player["first_name"]} {player["surname"]}'
-                + (f' ({nickname})' if nickname else "")
-            )
-
-            if item["data"]["ok"]:
-                char = item["data"]
-                value = f'**Level {char["level"]}** · {char["race"]} {char["class"]}'
-                if char.get("ruleset"):
-                    value += f'\n{text_ruleset(char["ruleset"])}'
-            else:
-                value = f'⚠️ {item["data"]["error"]}'
-
-            embed.add_field(name=display_name[:256], value=value[:1024], inline=False)
-
-        embed.set_footer(
-            text=f"Last checked: {checked_at} · Updates every {UPDATE_MINUTES} minutes · Page {page_number}/{len(chunks)}"
-        )
-        pages.append(embed)
-
-    return pages
-
-
-def text_ruleset(value):
-    return f"Ruleset: {value}"
 
 
 async def get_target_channel():
@@ -271,7 +373,7 @@ async def refresh_roster():
         results.append({"player": dict(player), "data": data})
         await asyncio.sleep(0.15)
 
-    embeds = build_embeds(results)
+    embeds = build_embeds(results, getattr((await get_target_channel()), "guild", None))
     channel = await get_target_channel()
     saved = get_roster_messages()
 
@@ -292,7 +394,6 @@ async def refresh_roster():
             message = await channel.send(embed=embed)
             save_roster_message(page, message.id)
 
-    # Remove old pages if the roster has become shorter.
     for page, old_message_id in saved.items():
         if page >= len(embeds):
             try:
@@ -332,9 +433,9 @@ async def on_ready():
 
 @bot.tree.command(name="addplayer", description="Add a WoW Forever EU character to the tracked roster.")
 @app_commands.describe(
-    first_name="Character's first name, exactly as shown in the Armory",
-    surname="Character's surname, exactly as shown in the Armory",
-    nickname="Your private/friendly nickname for this player"
+    first_name="Character first name, as shown in the Armory",
+    surname="Character surname, as shown in the Armory",
+    nickname="Optional server nickname / identity label"
 )
 @app_commands.checks.has_permissions(manage_messages=True)
 async def addplayer(
@@ -344,15 +445,14 @@ async def addplayer(
     nickname: str = ""
 ):
     await interaction.response.defer(ephemeral=True)
-
     try:
-        # Check that the character can currently be found before adding.
+        first_name = standardise_name(first_name)
+        surname = standardise_name(surname)
         data = await lookup_character_async(first_name, surname)
         if not data["ok"]:
             await interaction.followup.send(
                 f"Couldn't verify **{first_name} {surname}**: {data['error']}\n"
-                "The character may be below level 10, not logged out yet, "
-                "or temporarily missing from the public Armory. Nothing was added.",
+                "Nothing was added. Check the spelling and try again after the character has logged out.",
                 ephemeral=True
             )
             return
@@ -361,18 +461,20 @@ async def addplayer(
             add_player(first_name, surname, nickname)
         except sqlite3.IntegrityError:
             await interaction.followup.send(
-                "That character is already on the roster.", ephemeral=True
+                "That character is already on the roster. Use `/setnickname` to change its nickname.",
+                ephemeral=True
             )
             return
 
         await interaction.followup.send(
-            f'Added **{data["name"]}**'
-            + (f' ({nickname})' if nickname else "")
+            f'Added **{data["name"]} {data["surname"]}**'
+            + (f' ({nickname.strip()})' if nickname.strip() else "")
             + f' — level {data["level"]} {data["race"]} {data["class"]}.',
             ephemeral=True
         )
         await refresh_roster()
-
+    except ValueError as exc:
+        await interaction.followup.send(str(exc), ephemeral=True)
     except requests.RequestException:
         await interaction.followup.send(
             "Blizzard's API could not be reached. Please try again shortly.",
@@ -380,23 +482,48 @@ async def addplayer(
         )
 
 
+@bot.tree.command(name="setnickname", description="Set or change the server nickname shown beside a character.")
+@app_commands.describe(
+    first_name="Character first name",
+    surname="Character surname",
+    nickname="Nickname to display; enter a single hyphen (-) to clear it"
+)
+@app_commands.checks.has_permissions(manage_messages=True)
+async def setnickname(
+    interaction: discord.Interaction,
+    first_name: str,
+    surname: str,
+    nickname: str
+):
+    nickname_value = "" if nickname.strip() == "-" else nickname.strip()
+    if not update_nickname(first_name, surname, nickname_value):
+        await interaction.response.send_message(
+            "That character isn't on the tracked roster. Add them first with `/addplayer`.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"Updated nickname for **{standardise_name(first_name)} {standardise_name(surname)}**."
+        + (f" Display name: **{nickname_value}**." if nickname_value else " Nickname cleared."),
+        ephemeral=True
+    )
+    await refresh_roster()
+
+
 @bot.tree.command(name="removeplayer", description="Remove a character from the tracked roster.")
 @app_commands.describe(first_name="Character first name", surname="Character surname")
 @app_commands.checks.has_permissions(manage_messages=True)
-async def removeplayer(
-    interaction: discord.Interaction,
-    first_name: str,
-    surname: str
-):
-    slug = f"{first_name.strip()}-{surname.strip()}".casefold()
-    if not delete_player(slug):
+async def removeplayer(interaction: discord.Interaction, first_name: str, surname: str):
+    if not delete_player(first_name, surname):
         await interaction.response.send_message(
             "That character isn't currently tracked.", ephemeral=True
         )
         return
 
     await interaction.response.send_message(
-        f"Removed **{first_name} {surname}** from the roster.", ephemeral=True
+        f"Removed **{standardise_name(first_name)} {standardise_name(surname)}** from the roster.",
+        ephemeral=True
     )
     await refresh_roster()
 
@@ -441,13 +568,9 @@ async def refresh(interaction: discord.Interaction):
         )
 
 
-@bot.tree.command(name="player", description="Look up one tracked character.")
+@bot.tree.command(name="player", description="Look up one character in the WoW Forever Armory.")
 @app_commands.describe(first_name="Character first name", surname="Character surname")
-async def player(
-    interaction: discord.Interaction,
-    first_name: str,
-    surname: str
-):
+async def player(interaction: discord.Interaction, first_name: str, surname: str):
     await interaction.response.defer(ephemeral=True)
     data = await lookup_character_async(first_name, surname)
 
@@ -456,12 +579,10 @@ async def player(
         return
 
     embed = discord.Embed(
-        title=data["name"],
+        title=f'{data["name"]} {data["surname"]}',
         description=f'**Level {data["level"]}** · {data["race"]} {data["class"]}',
         colour=discord.Colour.blurple()
     )
-    if data.get("ruleset"):
-        embed.add_field(name="Ruleset", value=data["ruleset"])
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -470,7 +591,7 @@ async def command_error(interaction: discord.Interaction, error: app_commands.Ap
     if isinstance(error, app_commands.MissingPermissions):
         message = "You need the **Manage Messages** permission to use that command."
     else:
-        log.exception("Slash command error", exc_info=error)
+        log.error("Slash command error: %s", error, exc_info=error)
         message = "Something went wrong. Check the bot logs."
 
     if interaction.response.is_done():

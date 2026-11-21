@@ -1,63 +1,84 @@
-
 # WoW Forever EU Discord Player Tracker
 
-A small Discord bot that tracks WoW Forever EU characters through Blizzard's public
-profile API. It maintains a roster message in one Discord channel and refreshes it
-on a schedule.
+A Discord bot for tracking WoW Forever EU characters using the public character profile API.
+It maintains a roster message and refreshes it every 30 minutes by default.
 
 ## Features
 
-- `/addplayer` — add a character and an optional nickname
+- `/addplayer` — add a character and optional server nickname (identity label)
+- `/setnickname` — change or clear a character's nickname without removing them
 - `/removeplayer` — remove a character
 - `/players` — list tracked characters
 - `/player` — look up a character
 - `/refresh` — force an immediate roster refresh
-- Automatic refresh every 30 minutes by default
-- SQLite persistence for players and Discord roster message IDs
-- Multiple roster messages if more than 25 characters are tracked
+- Automatically orders characters from highest to lowest level
+- Gold, silver and bronze medals for the top three tracked characters
+- Server custom race and class emojis beside each character
+- First and surname are standardised with an initial capital, even when entered in lowercase
+- PvP ruleset text is not displayed
+- SQLite persistence and multiple roster pages when more than 25 players are tracked
 
-Commands that change the roster or force a refresh require the Discord
-**Manage Messages** permission.
+Commands that change the roster or force a refresh require the human user to have Discord's **Manage Messages** permission. The bot itself does not need the Manage Messages permission.
 
-## 1. Create the Discord application
+## 1. Discord application
 
-1. Open https://discord.com/developers/applications
-2. Create a New Application and name it `WoW Forever Player Tracker`.
-3. Open **Bot**, create the bot, and copy its token.
-4. Under **OAuth2 > URL Generator**, select the `bot` and `applications.commands`
-   scopes.
-5. Under Bot Permissions, select **View Channels**, **Send Messages**,
-   **Embed Links**, **Read Message History**, and **Manage Messages**.
-6. Use the generated URL to invite the bot to your server.
-7. In Discord, enable Developer Mode under **User Settings > Advanced**.
-8. Right-click the destination `#player-list` channel and copy its channel ID.
-9. Right-click your server icon/name and copy the server ID. Set this as `DISCORD_GUILD_ID` in your environment for near-instant slash-command registration (recommended).
+1. Create an application at https://discord.com/developers/applications.
+2. Create its bot and copy the bot token.
+3. Under OAuth2 > URL Generator, select `bot` and `applications.commands`.
+4. Under Bot Permissions select **View Channels**, **Send Messages**, **Embed Links**, and **Read Message History**.
+5. Use the generated URL to invite the bot to your server.
+6. Enable Developer Mode in Discord > User Settings > Advanced.
+7. Right-click `#player-list` and copy its channel ID. Right-click your server name/icon and copy the server ID.
 
-The bot does not need Message Content Intent. It uses slash commands.
+No privileged Gateway Intents are required. The bot uses slash commands and does not read ordinary chat messages.
 
-## 2. Create Blizzard API credentials
+## 2. Blizzard API credentials
 
-1. Open https://develop.battle.net/access/clients
-2. Create an API client.
-3. Copy the Client ID and Client Secret.
-4. Keep the Client Secret private. Never commit it to GitHub.
+1. Create an API client at https://develop.battle.net/access/clients.
+2. Copy its Client ID and Client Secret.
+3. Do not share or commit the Client Secret.
 
-The bot uses OAuth client-credentials authentication. It does not ask players for
-Battle.net passwords, BattleTags, or account access.
+The bot uses the OAuth client credentials flow. Players do not need to provide BattleTags or log in.
 
-## 3. Test locally (optional)
+## 3. Configure custom server emojis
 
-Install Python 3.11 or newer.
+The bot reads `emoji_config.json`. Its default mappings expect your server emojis to have these exact names:
 
-Copy `.env.example` to `.env` and fill in the four required values:
+**Class emojis**
+
+`warrior`, `paladin`, `hunter`, `rogue`, `priest`, `shaman`, `mage`, `warlock`, `druid`
+
+**Race emojis**
+
+`human`, `dwarf`, `night_elf`, `gnome`, `orc`, `undead`, `tauren`, `troll`
+
+Upload your custom emojis to your Discord server and name them to match the values above. Or, change the values in `emoji_config.json` to match the names you chose. The left-hand labels (for example `Night Elf`) must remain the race/class names returned by the Armory; the right-hand values are your Discord emoji names.
+
+Example: if your Night Elf emoji is named `nelf`, change:
+
+```json
+"Night Elf": "night_elf"
+```
+
+to:
+
+```json
+"Night Elf": "nelf"
+```
+
+The bot automatically resolves emoji names from the server it is in. If an emoji is missing or misspelled, the roster still works; it simply omits that emoji and logs a warning. The emojis must be in the same Discord server as the bot.
+
+## 4. Run locally (optional)
+
+Install Python 3.11 or newer. Copy `.env.example` to `.env` and fill in:
 
 - `DISCORD_TOKEN`
 - `BLIZZARD_CLIENT_ID`
 - `BLIZZARD_CLIENT_SECRET`
 - `DISCORD_CHANNEL_ID`
-- `DISCORD_GUILD_ID` (recommended; your server ID, so commands appear on that server quickly)
+- `DISCORD_GUILD_ID` (recommended, for fast server-specific slash-command sync)
 
-Then run:
+Then:
 
 ```bash
 python -m venv .venv
@@ -75,105 +96,80 @@ macOS/Linux:
 source .venv/bin/activate
 ```
 
-Install and start:
+Install and run:
 
 ```bash
 pip install -r requirements.txt
 python bot.py
 ```
 
-Leave the process running. Stop it with Ctrl+C.
+## 5. Deploy to Railway
 
-## 4. Deploy continuously on Railway
-
-This project includes a Dockerfile and `railway.json` for Railway deployment.
-
-1. Create a private GitHub repository, for example `wow-forever-discord-tracker`.
-2. Upload the project files (do not upload `.env`).
-3. Sign up at https://railway.com/ and create a new project.
-4. Choose **Deploy from GitHub Repo** and select the repository.
-5. Railway should detect the Dockerfile and build the worker.
-6. Open the service's **Variables** tab and add:
+1. Create a private GitHub repository.
+2. Upload all project files except `.env`, `*.sqlite3`, and `.venv`.
+3. In Railway, create a project and deploy from the GitHub repository.
+4. Railway uses the included Dockerfile.
+5. Add these variables to the Railway service:
    - `DISCORD_TOKEN`
    - `BLIZZARD_CLIENT_ID`
    - `BLIZZARD_CLIENT_SECRET`
    - `DISCORD_CHANNEL_ID`
-   - `DISCORD_GUILD_ID` (your server ID; recommended for quick slash-command registration)
-- `DISCORD_GUILD_ID` (recommended; your server ID, so commands appear on that server quickly)
+   - `DISCORD_GUILD_ID`
    - `UPDATE_MINUTES` = `30`
-   - `DATABASE_PATH` = `tracker.sqlite3`
-7. Deploy/redeploy the service.
-8. Open Railway's deployment logs. Look for `Logged in as ...` and
-   `Slash commands synced.`
+   - `DATABASE_PATH` = `/app/data/tracker.sqlite3`
+   - `EMOJI_CONFIG_PATH` = `emoji_config.json`
+6. Add a Railway Volume and mount it at **`/app/data`**.
+7. Deploy/redeploy and check the logs for `Logged in as ...` and `Slash commands synced to server ...`.
 
-Use a persistent Railway volume mounted at `/app` if your Railway plan supports
-volumes, so the SQLite database survives container replacement/redeployment.
-If you do not attach persistent storage, the database may be lost when the
-container is replaced. Back up `tracker.sqlite3` regularly.
+The `/app/data` volume keeps the SQLite database separate from the bot's program files. If you change the database path, make sure it remains inside the mounted directory. Check Railway's current pricing and volume availability before deployment; cloud hosting is not guaranteed to be free.
 
-Check Railway's current pricing and persistent-volume availability before
-deploying; cloud hosting is not guaranteed to be free.
+## 6. Discord commands
 
-## 5. Use it in Discord
-
-After the bot is online, slash commands should appear. If you set `DISCORD_GUILD_ID`, they are synced to that server; otherwise global command propagation can take longer:
+Add a character (nickname is optional):
 
 ```text
 /addplayer first_name: Rubin surname: Unneouette nickname: Seb
-/addplayer first_name: Peachykeen surname: Peachykeen nickname: Tibbz
-/addplayer first_name: Darug surname: Darug nickname: JOSH
-/addplayer first_name: Limog surname: Little nickname: damix
 ```
 
-The command checks the character before adding it. If Blizzard cannot find the
-profile, it will not add the character. Try again after the character has logged
-out and the public Armory has updated.
+Change an existing nickname:
 
-Then use:
+```text
+/setnickname first_name: Rubin surname: Unneouette nickname: Seb
+```
+
+Clear a nickname by entering a single hyphen (`-`) as its value.
+
+Other commands:
 
 ```text
 /players
-/refresh
 /player first_name: Rubin surname: Unneouette
+/refresh
 /removeplayer first_name: Rubin surname: Unneouette
 ```
 
-## How the Armory data works
+`/addplayer` checks the character profile before adding it. If the Armory profile cannot be found, check spelling and try again after the character has logged out and the public profile has updated.
 
-The bot calls:
+## 7. Roster behaviour
 
-`https://eu.api.blizzard.com/profile/wow/character/{first}-{surname}?namespace=profile-forever-eu&locale=en_GB`
-
-WoW Forever characters do not use realm slugs in this endpoint. The profile
-namespace and route are based on community testing because Blizzard's Forever
-API documentation is not yet complete.
-
-Public profiles generally appear from level 10 and after the character logs out.
-A 404 can also occur for an existing character due to temporary or profile-specific
-API availability issues. The bot reports this per character and continues with
-the rest of the roster.
-
-The API response supplies character level, race, and class. The nickname is
-your own label stored in the bot's SQLite database.
+- The list is sorted by current level, highest first. Players whose Armory lookup fails are placed after successful profiles.
+- The three highest-level successful character profiles receive 🥇, 🥈 and 🥉 in that order. Ties are resolved by character name, so the three positions remain deterministic.
+- Each character line shows medal (where applicable), race emoji, class emoji, character name and optional server nickname.
+- Ruleset/PvP text is omitted.
+- First and surname are stored/displayed with an initial capital even if entered in lowercase.
+- Nicknames are labels you assign; the Armory does not provide them.
+- Checks every 30 minutes by default. The Armory itself may update later than the bot's check.
 
 ## Troubleshooting
 
-- **Bot is offline:** check Railway logs and verify `DISCORD_TOKEN`.
-- **Missing slash commands:** wait briefly, restart the bot, and check that the
-  invite included `applications.commands`.
-- **Cannot send/edit roster:** check View Channel, Send Messages, Embed Links,
-  Read Message History, and Manage Messages permissions.
-- **401 from Blizzard:** verify the Client ID and Client Secret.
-- **403 from Blizzard:** verify that the API client is active and the namespace
-  is exactly `profile-forever-eu`.
-- **404 for a character:** verify the spelling and EU region; make sure the
-  character has reached level 10 and logged out. The public profile may also
-  be temporarily unavailable.
-- **Database resets after deploy:** attach persistent storage at `/app` and
-  set `DATABASE_PATH=/app/tracker.sqlite3`.
+- **Bot is offline:** verify `DISCORD_TOKEN` and check Railway logs.
+- **Commands do not appear:** verify the bot was invited with both `bot` and `applications.commands`; check `DISCORD_GUILD_ID`.
+- **Roster cannot be posted/edited:** the bot needs View Channels, Send Messages, Embed Links and Read Message History in the target channel.
+- **Class/race emoji missing:** check the exact server emoji name against `emoji_config.json`; ensure the bot is in the same server as the emojis.
+- **401 from Blizzard:** verify Client ID and Client Secret.
+- **404 for a character:** verify first/surname spelling and EU region; profiles may be unavailable or not refreshed yet.
+- **Database lost after redeploy:** ensure a persistent Railway volume is mounted at `/app/data` and `DATABASE_PATH=/app/data/tracker.sqlite3`.
 
 ## Security
 
-- Do not share your `.env` file or paste tokens into Discord.
-- Keep the GitHub repository private if it contains any operational notes.
-- If a Discord token or Blizzard secret is exposed, regenerate it immediately.
+Never share `.env`, Discord bot tokens, Blizzard Client Secrets or your SQLite database publicly. If a token or secret is exposed, regenerate it.

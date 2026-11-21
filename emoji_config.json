@@ -1,0 +1,23 @@
+{
+  "classes": {
+    "Warrior": "warrior",
+    "Paladin": "paladin",
+    "Hunter": "hunter",
+    "Rogue": "rogue",
+    "Priest": "priest",
+    "Shaman": "shaman",
+    "Mage": "mage",
+    "Warlock": "warlock",
+    "Druid": "druid"
+  },
+  "races": {
+    "Human": "human",
+    "Dwarf": "dwarf",
+    "Night Elf": "night_elf",
+    "Gnome": "gnome",
+    "Orc": "orc",
+    "Undead": "undead",
+    "Tauren": "tauren",
+    "Troll": "troll"
+  }
+}

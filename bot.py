@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+import random
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -21,7 +23,8 @@ BLIZZARD_CLIENT_ID = os.getenv("BLIZZARD_CLIENT_ID", "").strip()
 BLIZZARD_CLIENT_SECRET = os.getenv("BLIZZARD_CLIENT_SECRET", "").strip()
 CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
-UPDATE_MINUTES = max(5, int(os.getenv("UPDATE_MINUTES", "30")))
+UPDATE_MINUTES = max(1, int(os.getenv("UPDATE_MINUTES", "1")))
+LEVEL_UP_CHANNEL_ID = int(os.getenv("LEVEL_UP_CHANNEL_ID", "1552220682329395240"))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "tracker.sqlite3")
 EMOJI_CONFIG_PATH = os.getenv("EMOJI_CONFIG_PATH", "emoji_config.json")
 
@@ -35,10 +38,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("wow-tracker")
 
-if not all([DISCORD_TOKEN, BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, CHANNEL_ID]):
+if not all([DISCORD_TOKEN, BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, CHANNEL_ID, LEVEL_UP_CHANNEL_ID]):
     raise RuntimeError(
         "Set DISCORD_TOKEN, BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET "
-        "and DISCORD_CHANNEL_ID in your environment."
+        "DISCORD_CHANNEL_ID and LEVEL_UP_CHANNEL_ID in your environment."
     )
 
 
@@ -83,6 +86,24 @@ def init_db():
                 message_id INTEGER NOT NULL
             )
         """)
+        # Upgrade older installations without deleting their existing player data.
+        player_columns = {row["name"] for row in con.execute("PRAGMA table_info(players)")}
+        if "last_level" not in player_columns:
+            con.execute("ALTER TABLE players ADD COLUMN last_level INTEGER")
+
+        # Outbox prevents missed/duplicate notifications if Discord is briefly unavailable.
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS level_up_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL,
+                level INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                sent_message_id INTEGER,
+                UNIQUE(slug, level)
+            )
+        """)
 
 
 def list_players():
@@ -92,16 +113,16 @@ def list_players():
         ).fetchall()
 
 
-def add_player(first_name: str, surname: str, nickname: str):
+def add_player(first_name: str, surname: str, nickname: str, initial_level: int | None = None):
     first_name = standardise_name(first_name)
     surname = standardise_name(surname)
     slug = character_slug(first_name, surname)
     with db_connect() as con:
         con.execute(
-            """INSERT INTO players(slug, first_name, surname, nickname, added_at)
-               VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO players(slug, first_name, surname, nickname, added_at, last_level)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             (slug, first_name, surname, nickname.strip(),
-             datetime.now(timezone.utc).isoformat())
+             datetime.now(timezone.utc).isoformat(), initial_level)
         )
 
 
@@ -142,6 +163,201 @@ def save_roster_message(page: int, message_id: int):
 def delete_roster_message_page(page: int):
     with db_connect() as con:
         con.execute("DELETE FROM roster_messages WHERE page = ?", (page,))
+
+
+# ---------- Level-up announcements ----------
+
+# Each eligible template has an equal chance of being selected. Conditions add
+# candidates to the pool; they do not take priority over the general messages.
+GENERAL_LEVEL_MESSAGES = [
+    "{name} has just hit level {level}! Thick lightskin from la... and she got lil bellay :blush:",
+    "{name} has just hit level {level}! Gayming warlord!",
+    "{name} has just hit level {level}! Leave some XP for the rest of us, pal :joy:",
+    "{name} has just hit level {level}! Shit class anyway, go next character :sob:",
+    "{name} has just hit level {level}! What a fucking plonker :rofl:",
+    "{name} has just hit level {level}! Get up mush :flex:",
+    "{name} has just hit level {level}! up the ra",
+    "{name} has just hit level {level}! Goodness gracious what a gaymer",
+    "{name} has just hit level {level}! FUCK YOU",
+]
+
+UPPER_HALF_LEVEL_MESSAGES = [
+    "{name} has just hit level {level}! Time to take a shower?",
+    "{name} has just hit level {level}! Do NOT come within smelling distance of this guy :skull:",
+    (
+        "{name} has just hit level {level}!\n"
+        "Our Father who art in heaven\n"
+        "hallowed be thy name\n"
+        "thy kingdom come\n"
+        "thy will be done\n"
+        "on earth as it is in heaven\n"
+        "Give us this day our daily bread\n"
+        "And forgive us our trespasses\n"
+        "as we forgive those who trespass against us\n"
+        "And lead us not into temptation\n"
+        "but deliver us from evil\n"
+        "For thine is the kingdom\n"
+        "the power and the glory\n"
+        "for ever and ever\n"
+        "Amen"
+    ),
+]
+
+LOWER_HALF_LEVEL_MESSAGES = [
+    "{name} has just hit level {level}! At the rate this guy's going, he might be 60 by 2030 :rofl:",
+    "{name} has just hit level {level}! Sluggish gaming :sob: :snail:",
+    "{name} has just hit level {level}! 3FanZ levelling speeds over here :sob: :snail:",
+]
+
+LOWER_HALF_LEVEL_MESSAGES = [
+    "{name} has just hit level {level}! At the rate this guy's going, he might be 60 by 2030 :rofl:",
+    "{name} has just hit level {level}! Sluggish gaming :sob: :snail:",
+    "{name} has just hit level {level}! 3FanZ levelling speeds over here :sob: :snail:",
+]
+
+SPECIAL_PLAYER_MESSAGES = {
+    "burberry scarf": [
+        "{name} has just hit level {level}! 68 Doidge Road, B23 7SG, Birmingham, West Midlands :rofl:"
+    ],
+    "peachykeen peachykeen": [
+        "{name} has just hit level {level}! yo wipe my dungeon again I WILL rape you tymon :joy:"
+    ],
+    "jittle yang": [
+        "{name} has just hit level {level}! World class huntard :sob: :ethan:"
+    ],
+}
+
+# Standard Discord emoji shortcodes plus server-specific custom emoji names.
+BUILTIN_EMOJI_ALIASES = {
+    "joy": "😂",
+    "rofl": "🤣",
+    "sob": "😭",
+    "blush": "😊",
+    "flex": "💪",
+    "skull": "💀",
+    "snail": "🐌",
+}
+EMOJI_TOKEN_RE = re.compile(r":([A-Za-z0-9_]+):")
+
+
+def resolve_emoji_tokens(content: str, guild: discord.Guild | None) -> str:
+    custom = {}
+    if guild is not None:
+        custom = {emoji.name.casefold(): str(emoji) for emoji in guild.emojis}
+
+    def replace(match):
+        emoji_name = match.group(1)
+        key = emoji_name.casefold()
+        if key in BUILTIN_EMOJI_ALIASES:
+            return BUILTIN_EMOJI_ALIASES[key]
+        if key in custom:
+            return custom[key]
+        log.warning("Announcement references :%s: but no matching server emoji exists.", emoji_name)
+        return match.group(0)
+
+    return EMOJI_TOKEN_RE.sub(replace, content)
+
+
+def choose_level_up_message(character_full_name: str, display_name: str, level: int, rank: int, total_players: int) -> str:
+    eligible = list(GENERAL_LEVEL_MESSAGES)
+
+    # For odd-sized rosters, the upper half gets the extra position. Ranking is
+    # by current level descending, then character name alphabetically for ties.
+    upper_half_size = (total_players + 1) // 2
+    if rank <= upper_half_size:
+    eligible.extend(UPPER_HALF_LEVEL_MESSAGES)
+else:
+    eligible.extend(LOWER_HALF_LEVEL_MESSAGES)
+
+    eligible.extend(SPECIAL_PLAYER_MESSAGES.get(character_full_name.casefold(), []))
+    selected = random.choice(eligible)
+    return selected.format(name=display_name, level=level)
+
+
+def queue_level_up_events(results):
+    """Compare current levels with stored levels and persist new notifications."""
+    successful = [item for item in results if item["data"].get("ok")]
+    successful.sort(key=lambda item: (
+        -int(item["data"].get("level", 0)),
+        f'{item["data"].get("name", "")} {item["data"].get("surname", "")}'.casefold()
+    ))
+    rank_by_slug = {item["player"]["slug"]: index for index, item in enumerate(successful, start=1)}
+    total_players = len(successful)
+
+    with db_connect() as con:
+        for item in successful:
+            player = item["player"]
+            data = item["data"]
+            try:
+                current_level = int(data["level"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            row = con.execute(
+                "SELECT last_level FROM players WHERE slug = ?", (player["slug"],)
+            ).fetchone()
+            if row is None:
+                continue
+
+            previous_level = row["last_level"]
+            # Existing players from the previous bot version have no baseline yet.
+            # Store their current level without announcing a false level-up.
+            if previous_level is None:
+                con.execute(
+                    "UPDATE players SET last_level = ? WHERE slug = ?",
+                    (current_level, player["slug"])
+                )
+                continue
+
+            if current_level > int(previous_level):
+                full_name = f'{data["name"]} {data["surname"]}'
+                nickname = player.get("nickname", "")
+                display_name = full_name + (f" ({nickname})" if nickname else "")
+                content = choose_level_up_message(
+                    full_name, display_name, current_level,
+                    rank_by_slug[player["slug"]], total_players
+                )
+                con.execute(
+                    """INSERT OR IGNORE INTO level_up_events
+                       (slug, level, content, status, created_at)
+                       VALUES (?, ?, ?, 'pending', ?)""",
+                    (player["slug"], current_level, content,
+                     datetime.now(timezone.utc).isoformat())
+                )
+                con.execute(
+                    "UPDATE players SET last_level = ? WHERE slug = ?",
+                    (current_level, player["slug"])
+                )
+            elif current_level < int(previous_level):
+                # Correct a stale/higher saved level without announcing a level-up.
+                con.execute(
+                    "UPDATE players SET last_level = ? WHERE slug = ?",
+                    (current_level, player["slug"])
+                )
+
+
+async def deliver_pending_level_up_events():
+    """Send queued announcements and mark them sent only after Discord accepts them."""
+    channel = bot.get_channel(LEVEL_UP_CHANNEL_ID)
+    if channel is None:
+        channel = await bot.fetch_channel(LEVEL_UP_CHANNEL_ID)
+    guild = getattr(channel, "guild", None)
+
+    with db_connect() as con:
+        pending = con.execute(
+            "SELECT event_id, content FROM level_up_events WHERE status = 'pending' ORDER BY event_id"
+        ).fetchall()
+
+    for event in pending:
+        content = resolve_emoji_tokens(event["content"], guild)
+        message = await channel.send(
+            content, allowed_mentions=discord.AllowedMentions.none()
+        )
+        with db_connect() as con:
+            con.execute(
+                "UPDATE level_up_events SET status = 'sent', sent_message_id = ? WHERE event_id = ?",
+                (message.id, event["event_id"])
+            )
 
 
 # ---------- Blizzard Forever API ----------
@@ -373,8 +589,8 @@ async def refresh_roster():
         results.append({"player": dict(player), "data": data})
         await asyncio.sleep(0.15)
 
-    embeds = build_embeds(results, getattr((await get_target_channel()), "guild", None))
     channel = await get_target_channel()
+    embeds = build_embeds(results, getattr(channel, "guild", None))
     saved = get_roster_messages()
 
     for page, embed in enumerate(embeds):
@@ -402,6 +618,20 @@ async def refresh_roster():
             except (discord.NotFound, discord.Forbidden):
                 pass
             delete_roster_message_page(page)
+
+    # Queue and deliver level-up notifications after comparing the full fresh roster.
+    queue_level_up_events(results)
+    try:
+        await deliver_pending_level_up_events()
+    except discord.Forbidden:
+        log.exception(
+            "Cannot post level-up messages. Give the bot View Channel and Send Messages "
+            "permissions in channel %s.", LEVEL_UP_CHANNEL_ID
+        )
+    except discord.NotFound:
+        log.exception("Level-up channel %s was not found.", LEVEL_UP_CHANNEL_ID)
+    except Exception:
+        log.exception("Could not deliver pending level-up announcements; they will retry next poll.")
 
     log.info("Roster refreshed: %s tracked character(s).", len(players))
     return len(players)
@@ -458,7 +688,7 @@ async def addplayer(
             return
 
         try:
-            add_player(first_name, surname, nickname)
+            add_player(first_name, surname, nickname, initial_level=int(data["level"]))
         except sqlite3.IntegrityError:
             await interaction.followup.send(
                 "That character is already on the roster. Use `/setnickname` to change its nickname.",

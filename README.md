@@ -1,7 +1,7 @@
 # WoW Forever EU Discord Player Tracker
 
 A Discord bot for tracking WoW Forever EU characters using the public character profile API.
-It maintains a roster message and refreshes it every 30 minutes by default.
+It maintains a roster message and polls tracked character profiles every 1 minute by default.
 
 ## Features
 
@@ -25,7 +25,7 @@ Commands that change the roster or force a refresh require the human user to hav
 1. Create an application at https://discord.com/developers/applications.
 2. Create its bot and copy the bot token.
 3. Under OAuth2 > URL Generator, select `bot` and `applications.commands`.
-4. Under Bot Permissions select **View Channels**, **Send Messages**, **Embed Links**, and **Read Message History**.
+4. Under Bot Permissions select **View Channels**, **Send Messages**, **Embed Links**, and **Read Message History**. Also ensure the bot can view and send messages in the `#genny` announcement channel.
 5. Use the generated URL to invite the bot to your server.
 6. Enable Developer Mode in Discord > User Settings > Advanced.
 7. Right-click `#player-list` and copy its channel ID. Right-click your server name/icon and copy the server ID.
@@ -115,7 +115,8 @@ python bot.py
    - `BLIZZARD_CLIENT_SECRET`
    - `DISCORD_CHANNEL_ID`
    - `DISCORD_GUILD_ID`
-   - `UPDATE_MINUTES` = `30`
+   - `UPDATE_MINUTES` = `1` (fastest polling interval; see the refresh note below)
+   - `LEVEL_UP_CHANNEL_ID` = `1552220682329395240`
    - `DATABASE_PATH` = `/app/data/tracker.sqlite3`
    - `EMOJI_CONFIG_PATH` = `emoji_config.json`
 6. Add a Railway Volume and mount it at **`/app/data`**.
@@ -164,7 +165,8 @@ Other commands:
 
 - **Bot is offline:** verify `DISCORD_TOKEN` and check Railway logs.
 - **Commands do not appear:** verify the bot was invited with both `bot` and `applications.commands`; check `DISCORD_GUILD_ID`.
-- **Roster cannot be posted/edited:** the bot needs View Channels, Send Messages, Embed Links and Read Message History in the target channel.
+- **Roster cannot be posted/edited:** the bot needs View Channels, Send Messages, Embed Links and Read Message History in the roster channel.
+- **Level-up announcements do not appear:** check `LEVEL_UP_CHANNEL_ID`, and give the bot View Channel and Send Messages in that channel. Check Railway logs for missing custom emoji names or Discord permission errors.
 - **Class/race emoji missing:** check the exact server emoji name against `emoji_config.json`; ensure the bot is in the same server as the emojis.
 - **401 from Blizzard:** verify Client ID and Client Secret.
 - **404 for a character:** verify first/surname spelling and EU region; profiles may be unavailable or not refreshed yet.
